@@ -74,12 +74,28 @@ ADR is the mean nightly price of the real Airbnb comps. Occupancy is 55% within 
 
 About 15.5 hours had been logged by Sep 8 (per `Finder_Agent_Time_Log.md`).
 
-## Known issues / next steps (found while reviewing the exports)
+## Known issues / next steps
 
-1. **Finder → Report contract mismatch.** The Report Agent reads `candidate.market`, `candidate.lat` and `candidate.lng`, but Finder candidates carry none of them. Without a mapping step, rental comps get `location: undefined`, the reference tables come back null, and the elevation lookup fails. Fix: have Zillow `Normalize Candidates` emit `lat`, `lng` and `market` (e.g. `${city}, ${state}` mapped to the four market keys), or add a mapping node in front of the Report Agent.
-2. **Rental comps are fetched once per candidate**, even when several candidates share a market. That's duplicate paid Bright Data calls; cache per market.
-3. **ADR comes from a single 3-night stay 30 days out**, with 2 adults and no size matching. For ski STR this misses seasonality entirely: peak winter vs shoulder vs summer. Sample several stay windows and filter comps by bedroom count against the candidate.
-4. **Sold comps and price history are not wired in yet.** The Report Agent says this in its gaps, so a fair-market-value analysis (sections 10-13 of the underwriting prompt) isn't possible yet.
-5. The candidate tracker sheet isn't written to by any workflow; add a Google Sheets append after the Finder.
-6. `Finder_Agent_Build_Guide.md` still says GPT-5.1 for the Finder, but the live export (`Finder Agent.json`) uses Claude Sonnet 4.6. `Finder_Agent.json` is the older Sep 8 version (GPT-5.1, placeholder sub-workflow ID).
-7. Tax treatment beyond the placeholder is deliberately deferred to the Tax Agent and the client's CPA document. Keep it that way.
+Last reviewed 2026-10-03 against the live n8n exports uploaded to the top of the Drive folder (`<Workflow> - <n8n id>.json`). Those exports supersede the copies in `ai_agent_RealEstate/`.
+
+1. **Finder → Report contract mismatch (still open).** The Report Agent reads `candidate.market`, `lat` and `lng`, and the sheet publisher reads `market`, but Finder candidates carry none of these fields. Fix: have Zillow `Normalize Candidates` emit `lat`, `lng` and `market`, using exactly the reference-table keys (`"Park City, UT"`, `"Steamboat Springs, CO"`, `"Jackson Hole, WY"`, `"Vail, CO"`).
+2. **Report Agent probably collapses N candidates into 1.** `Get Rental Comps` is an Execute Workflow node (v1.2) left on its default mode, which runs once with all items. The sub-workflow reads only `$input.first()` and returns a single item, so only the first candidate survives into the report. Fix: set mode to "Run once for each item", or better, fetch comps once per distinct market and join them back.
+3. **The live Zillow sub-workflow (`5MIjR1WcvWIbqhjj`) mixes the sync and async APIs.** It POSTs to the synchronous `/datasets/v3/scrape` and then always polls `snapshot_id`. Per Bright Data's docs, `/scrape` returns the records directly when they're ready within about 1 minute, and returns HTTP 202 with a `snapshot_id` only when they aren't. On a fast response, `snapshot_id` is undefined, the loop polls `/progress/undefined` until the 15-minute deadline, and the result is reported as "no data". Fix: add `IF $json.snapshot_id exists` → poll, else → `Normalize Candidates`. Apply the same fix to the Airbnb sub-workflow. The live version also dropped `retryOnFail`, and `Finder_Agent_Build_Guide.md` still describes the sync-only design.
+4. **Webhook callers can wait 15-25 minutes.** All entry points use `responseMode: responseNode` while the sub-workflows poll with long deadlines, so HTTP clients and proxies will usually time out first. Respond immediately with a job id, then write results to the sheet or a Doc.
+5. **`Publish Candidates to Sheet` (`ITZ1EvjozAxRBAic`) can't write rows as built.** It's inactive. The "Get row(s) in sheet" node has an empty document and sheet. An empty sheet yields zero items, so the append never runs. The append maps lowercase fields (`$json.address`) from the sheet-row item instead of the candidate. Nothing splits `body.candidates` into items. There's no Respond to Webhook node, although the webhook expects one. Nothing calls it from the Finder. Intended shape: Webhook → Code (split candidates and derive market) → Get rows (configured, `alwaysOutputData`, execute once) → Code (drop URLs already in the sheet) → Append → Respond `{appended, skipped}`.
+6. **Rental comps are fetched once per candidate**, so candidates in the same market repeat paid Bright Data calls. Cache per market.
+7. **ADR comes from one 3-night stay 30 days out**, with 2 adults and no size matching. In October that samples early November, before most resorts open, and that rate is then applied year-round. Sample peak (Dec-Mar), summer and shoulder windows, weight them, and filter comps by bedroom count.
+8. **Client profile drift.** The archived intake workflow (`LIlGhsOxINyT4Lxk`) holds the full client profile, and the live pipeline has lost parts of it:
+   - The **direct-flight-from-home-airport hard filter** and the 3-hour airport-to-property drive cap.
+   - The **11-market eligibility table** (Vail/Beaver Creek EGE, Aspen ASE, Telluride MTJ, Steamboat HDN, Jackson JAC, Park City SLC, Tahoe RNO, Breckenridge/Keystone DEN, Taos ABQ; Sun Valley excluded; Big Sky unconfirmed). The Report Agent's tables cover only 4 of them.
+   - The **total-return target**, which the Report Agent never checks a candidate against.
+   - The **available-cash limit**, which makes the all-cash scenario infeasible at these prices.
+   - **"All-in" budget semantics** (purchase + rehab/build + furnishings), whereas the Finder filters on purchase price only.
+   Port the profile into the Report Agent's `client_goals` defaults and the market/airport table into the Finder. The archived workflow itself was non-functional: `zillowSlug` was never set, and it used Web Unlocker raw HTML with no parser. Leave it archived.
+9. **Sold comps and price history are not wired in yet**, so no fair-market-value analysis is possible.
+10. **The report isn't persisted.** It's returned only in the webhook response, so the sheet's `Report Doc Link` stays empty.
+11. **Tax:** keep deferring to the Tax Agent and the CPA document. Add standing questions for the CPA: personal-use days vs. rental days, and the client's stated interest in accelerated depreciation. The model's 27.5-year straight-line shield is only a placeholder.
+12. **Minor issues:**
+    - Tax Agent's parse fallback returns `raw_output` untruncated.
+    - Exports include credential IDs (not secrets) and a personal email in the Nominatim User-Agent.
+    - `Finder_Agent.json` in the subfolder is the older GPT-5.1 version.
